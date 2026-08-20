@@ -108,3 +108,11 @@ breaks_added := lu.get_line_breaks(text, &backing)
 	fmt.printf("  minimum:      %v/rune (%s)\n", minimum, min_file)
 	fmt.printf("  maximum:      %v/rune (%s)\n", maximum, max_file)
 ```
+
+# Licensing
+
+The original source code in this repository is licensed under the MIT License.
+
+This repository also contains data derived from the Unicode Character Database.
+Such data is subject to the Unicode License v3. See `UNICODE-LICENSE` for
+details.
