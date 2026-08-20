@@ -67,8 +67,8 @@ breaks_added := lu.get_line_breaks(text, &backing)
 
 		elapsed := time.since(begin)
 
-    per_run := elapsed / time.Duration(benchmark_iterations)
-    per_rune := elapsed / time.Duration(benchmark_iterations * rune_count)
+    	per_run := elapsed / time.Duration(benchmark_iterations)
+    	per_rune := elapsed / time.Duration(benchmark_iterations * rune_count)
 
 		aggregate_time += elapsed
 		aggregate_runes += rune_count * benchmark_iterations
