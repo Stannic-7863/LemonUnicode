@@ -93,26 +93,58 @@ main :: proc() {
 	test := parse_line_break_test(context.allocator)
 
 	not_matched := 0
-	for t, i in test.tests {
-		breaks := [dynamic]u14.Break_Result{}
-		begin := time.now()
-		u14.get_line_breaks(t.text, &breaks)
-		since := time.since(begin)
-		for j in 0..<len(breaks) {
-			b_algo := breaks[j]
-			b_test := &t.breaks[b_algo.rune_number]
 
-			should_break := b_algo.opportunity == .Mandatory || b_algo.opportunity == .Optional
+	for t, test_index in test.tests {
+		texts := make([dynamic]string, context.allocator)
+		defer delete(texts)
+
+		start := 0
+		rune_count := 0
+
+		for _, byte_offset in t.text {
+			if rune_count > 0 && rune_count % 3 == 0 {
+				append(&texts, t.text[start:byte_offset])
+				start = byte_offset
+			}
+
+			rune_count += 1
+		}
+
+		if start < len(t.text) {
+			append(&texts, t.text[start:])
+		}
+
+		breaks := [dynamic]u14.Segment_Break_Result{}
+		defer delete(breaks)
+
+		u14.get_line_breaks_segments(texts[:], &breaks)
+
+		for b in breaks {
+			b_test := &t.breaks[b.rune_number]
+
+			should_break := b.opportunity == .Mandatory || b.opportunity == .Optional
 
 			if b_test^ != should_break {
-				fmt.printfln("#test-no: %i | #line-no: %i \nGot: %v\nExpected: %v\nMismatch at: %i", i, t.line_number, breaks, t.breaks, b_algo.rune_number)
+				fmt.printfln(
+					"#test-no: %i | #line-no: %i\n"+ "Got: %v\n"+ "Expected: %v\n"+ "Mismatch at rune: %i\n"+ "Segment: %i | Byte offset: %i | Logical offset: %i",
+					test_index, t.line_number, breaks, t.breaks, b.rune_number, b.segment_index, b.byte_offset, b.logical_byte_offset,
+				)
+
 				not_matched += 1
 			}
 
 			b_test^ = false
 		}
 
-		for b, j in t.breaks { if b { fmt.printfln("#test-no: %i | #line-no: %i \nGot: %v\nExpected: %v\nMismatch at: %i", i, t.line_number, breaks, t.breaks, j) }}
+		for expected, rune_index in t.breaks {
+			if expected {
+				fmt.printfln(
+					"#test-no: %i | #line-no: %i\n"+"Expected break missing at rune: %i\n"+"Segments: %v\n"+"Text: %q",
+					test_index, t.line_number, rune_index, texts, t.text,
+				)
+				not_matched += 1
+			}
+		}
 	}
 
 	fmt.println("All tests passed" if not_matched == 0 else "Tests Failed")

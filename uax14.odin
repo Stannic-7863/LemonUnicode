@@ -4,10 +4,8 @@ import "base:runtime"
 import "core:unicode/utf8"
 
 /*
-
 Rolling Context Approach:
-
-
+[Todo]: Elab
 */
 
 Line_Break_Classes :: bit_set[Line_Break_Class]
@@ -19,12 +17,25 @@ Break_Opportunity :: enum {
 }
 
 Rule_Context :: struct {
+	cm_zwj_run:               bool,
+	regional_indicator_run:   int, // Need for rule LB30a
+	curr_offset:              int,
+	next_offset:              int,
+	next_next_offset:         int,
+
+	curr_segment:             int,
+	next_segment:             int,
+	next_next_segment:        int,
+	logical_curr_offset:      int,
+	logical_rune_number:      int,
+
 	prev_rune_non_space:      rune `fmt:"X"`,
 	prev_prev_rune:           rune `fmt:"X"`,
 	prev_rune:                rune `fmt:"X"`,
 	curr_rune:                rune `fmt:"X"`,
 	next_rune:                rune `fmt:"X"`,
 	next_next_rune:           rune `fmt:"X"`,
+
 	prev_non_is_sy:           Line_Break_Class,
 	prev_prev_non_is_sy:      Line_Break_Class,
 	prev_non_space_prev:      Line_Break_Class,
@@ -34,12 +45,6 @@ Rule_Context :: struct {
 	curr:                     Line_Break_Class,
 	next:                     Line_Break_Class,
 	next_next:                Line_Break_Class,
-	regional_indicator_run:   int, // Need for rule LB30a
-	cm_zwj_run:               bool,
-	curr_offset:              int,
-	next_offset:              int,
-	next_next_offset:         int,
-	rune_number:              int, // number of rune/codepoints processed so far
 }
 
 rule_lb_1 :: proc(ctx: ^Rule_Context) {
@@ -135,7 +140,7 @@ rule_lb_8a :: proc(ctx: Rule_Context) -> (opportunity: Break_Opportunity, matche
 	return .No_Break, false
 }
 
-rule_lb_9 :: proc(ctx: ^Rule_Context, text: string) -> (opportunity: Break_Opportunity, matched: bool) {
+rule_lb_9 :: proc(ctx: ^Rule_Context) -> (opportunity: Break_Opportunity, matched: bool) {
 	// LB9: Convert CM or ZWJ to base class
 	rule_lb_9_set_a :: Line_Break_Classes{.BK, .CR, .LF, .NL, .SP, .ZW}
 	rule_lb_9_set_b :: Line_Break_Classes{.CM, .ZWJ}
@@ -150,7 +155,7 @@ rule_lb_9 :: proc(ctx: ^Rule_Context, text: string) -> (opportunity: Break_Oppor
 	return .No_Break, true
 }
 
-rule_lb_10 :: proc(ctx: ^Rule_Context, text: string) {
+rule_lb_10 :: proc(ctx: ^Rule_Context) {
 	// LB10: Treat leftovers from lb9 as 'A'
 	rule_lb_10_set :: Line_Break_Classes{.CM, .ZWJ}
 
@@ -571,6 +576,14 @@ Break_Result :: struct {
     opportunity: Break_Opportunity,
 }
 
+Segment_Break_Result :: struct {
+	byte_offset: int,
+	rune_number: int,
+	segment_index:       int,
+	logical_byte_offset: int,
+	opportunity: Break_Opportunity,
+}
+
 init_context :: proc(text: string) -> Rule_Context {
 	ctx := Rule_Context{}
 	ctx.prev = .SOT
@@ -590,7 +603,6 @@ init_context :: proc(text: string) -> Rule_Context {
 	roll_context(&ctx, text)
 	rule_lb_1(&ctx)
 
-	ctx.rune_number = 0
 	return ctx
 }
 
@@ -638,10 +650,95 @@ roll_context :: proc(ctx: ^Rule_Context, text: string) {
 	if ctx.next_next_offset < len(text) {
 		ctx.next_next_rune = utf8.rune_at(text, ctx.next_next_offset)
 		ctx.next_next = line_break_from_rune(ctx.next_next_rune)
-	} else {
+		return
+	}
+
+	ctx.next_next = .EOT
+	ctx.next_next_rune = 0
+}
+
+init_context_segment :: proc(texts: []string) -> Rule_Context {
+	ctx := Rule_Context{}
+	ctx.prev = .SOT
+	ctx.curr = .SOT
+	ctx.prev_non_space = .SOT
+	ctx.prev_non_space_prev = .SOT
+	ctx.prev_prev_non_is_sy = .SOT
+	ctx.prev_non_is_sy = .SOT
+	ctx.curr = .SOT
+	ctx.next = .SOT
+	ctx.next_next = .SOT
+
+	ctx.next_next_rune, _ = utf8.decode_rune_in_string(texts[0])
+	ctx.next_next = line_break_from_rune(ctx.next_next_rune)
+
+	rule_lb_1(&ctx)
+	roll_context_segment(&ctx, texts)
+	rule_lb_1(&ctx)
+
+	return ctx
+}
+
+roll_context_segment :: proc(ctx: ^Rule_Context, text: []string) {
+	// Special rule lb 9 handling
+	// According to rule lb 9 we need to treat sequence of (CM|ZWJ) as prev. Treat X (CM | ZWJ)* as if it were X.
+	// So if we detect a sequence of (ZWJ | CM) we stop rolling over to prev.
+	// This has the effect of skip ZWJ|CM runs while applying rule lb1 to lb8 which must be applied before coverting the sequence.
+	if !ctx.cm_zwj_run {
+		if ctx.prev == .RI {
+			ctx.regional_indicator_run += 1
+		} else {
+			ctx.regional_indicator_run = 0
+		}
+
+		if ctx.curr != .SY && ctx.curr != .IS {
+			ctx.prev_prev_non_is_sy = ctx.prev_non_is_sy
+			ctx.prev_non_is_sy = ctx.curr
+		}
+
+		if ctx.curr != .SP {
+			ctx.prev_non_space_prev = ctx.prev
+			ctx.prev_non_space = ctx.curr
+			ctx.prev_rune_non_space = ctx.curr_rune
+		}
+
+		ctx.prev_prev_rune = ctx.prev_rune
+		ctx.prev_prev = ctx.prev
+
+		ctx.prev_rune = ctx.curr_rune
+		ctx.prev = ctx.curr
+	}
+
+	ctx.logical_curr_offset += utf8.rune_size(ctx.curr_rune)
+
+	ctx.curr = ctx.next
+	ctx.curr_rune = ctx.next_rune
+	ctx.curr_offset = ctx.next_offset
+	ctx.curr_segment = ctx.next_segment
+
+	ctx.next = ctx.next_next
+	ctx.next_rune = ctx.next_next_rune
+	ctx.next_offset = ctx.next_next_offset
+	ctx.next_segment = ctx.next_next_segment
+
+	ctx.next_next_offset += utf8.rune_size(ctx.next_next_rune)
+
+	if ctx.next_next_offset < len(text[ctx.next_next_segment]) {
+		ctx.next_next_rune = utf8.rune_at(text[ctx.next_next_segment], ctx.next_next_offset)
+		ctx.next_next = line_break_from_rune(ctx.next_next_rune)
+		return
+	}
+
+	if ctx.next_next_segment == len(text) - 1 { // Last segment should be treated as the end of it all
 		ctx.next_next = .EOT
 		ctx.next_next_rune = 0
+		return
 	}
+	// If not last segment, move over to next segment
+	ctx.next_next_segment += 1
+	ctx.next_next_offset = 0
+	ctx.next_next_rune = utf8.rune_at(text[ctx.next_next_segment], ctx.next_next_offset)
+	ctx.next_next = line_break_from_rune(ctx.next_next_rune)
 }
 
 default_tailorable_rules :: proc(ctx: Rule_Context) -> (opportunity: Break_Opportunity, matched: bool) {
@@ -670,7 +767,7 @@ get_line_breaks :: proc(
 
 	match_rule :: proc(ctx: Rule_Context, results: ^[dynamic]Break_Result, opportunity: Break_Opportunity, matched: bool) -> bool {
 		if matched && opportunity != .No_Break {
-			append(results, Break_Result{byte_offset = ctx.curr_offset, opportunity = opportunity, rune_number = ctx.rune_number})
+			append(results, Break_Result{byte_offset = ctx.curr_offset, opportunity = opportunity, rune_number = ctx.logical_rune_number})
 		}
 		return !matched
 	}
@@ -683,7 +780,7 @@ get_line_breaks :: proc(
 	for {
 		roll_context(&ctx, text)
 		if (ctx.curr == .EOT) { break }
-		defer ctx.rune_number += 1
+		defer ctx.logical_rune_number += 1
 		ctx.cm_zwj_run = false
 
 		// Non Tailorable Rules
@@ -695,8 +792,60 @@ get_line_breaks :: proc(
 		match_rule(ctx, results, rule_lb_7(ctx)) or_continue
 		match_rule(ctx, results, rule_lb_8(ctx)) or_continue
 		match_rule(ctx, results, rule_lb_8a(ctx)) or_continue
-		match_rule(ctx, results, rule_lb_9(&ctx, text)) or_continue
-		rule_lb_10(&ctx, text)
+		match_rule(ctx, results, rule_lb_9(&ctx)) or_continue
+		rule_lb_10(&ctx)
+
+		// Tailorable Rules
+		match_rule(ctx, results, default_tailorable_rules(ctx)) or_continue
+
+	}
+
+	match_rule(ctx, results, rule_lb_3(ctx))
+
+	return len(results) - start
+}
+
+get_line_breaks_segments :: proc(
+	texts: []string,
+	results: ^[dynamic]Segment_Break_Result,
+	tailorable: proc(Rule_Context) -> (Break_Opportunity, bool) = default_tailorable_rules
+) -> int {
+
+	match_rule :: proc(ctx: Rule_Context, results: ^[dynamic]Segment_Break_Result, opportunity: Break_Opportunity, matched: bool) -> bool {
+		if matched && opportunity != .No_Break {
+			append(results, Segment_Break_Result{
+				byte_offset = ctx.curr_offset,
+				opportunity = opportunity,
+				rune_number = ctx.logical_rune_number,
+				logical_byte_offset = ctx.logical_curr_offset,
+				segment_index = ctx.curr_segment,
+			})
+		}
+		return !matched
+	}
+
+	if len(texts) == 0 { return 0 }
+	ctx := init_context_segment(texts)
+
+	start := len(results)
+
+	for {
+		roll_context_segment(&ctx, texts)
+		if (ctx.curr == .EOT) { break }
+		defer ctx.logical_rune_number += 1
+		ctx.cm_zwj_run = false
+
+		// Non Tailorable Rules
+		rule_lb_1(&ctx)
+		match_rule(ctx, results, rule_lb_2(ctx)) or_continue
+		match_rule(ctx, results, rule_lb_4(ctx)) or_continue
+		match_rule(ctx, results, rule_lb_5(ctx)) or_continue
+		match_rule(ctx, results, rule_lb_6(ctx)) or_continue
+		match_rule(ctx, results, rule_lb_7(ctx)) or_continue
+		match_rule(ctx, results, rule_lb_8(ctx)) or_continue
+		match_rule(ctx, results, rule_lb_8a(ctx)) or_continue
+		match_rule(ctx, results, rule_lb_9(&ctx)) or_continue
+		rule_lb_10(&ctx)
 
 		// Tailorable Rules
 		match_rule(ctx, results, default_tailorable_rules(ctx)) or_continue
